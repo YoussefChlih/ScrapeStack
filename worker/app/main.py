@@ -6,9 +6,14 @@ asynchronously using Playwright + BeautifulSoup.
 """
 
 import os
+import sys
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+
+# Fix Windows asyncio subprocess event loop issue (e.g. Playwright NotImplementedError)
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 from fastapi import FastAPI, HTTPException, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,6 +52,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         os.getenv("FRONTEND_URL", "http://localhost:3000"),
+        "http://localhost:3001",
+        "http://localhost:3002",
     ],
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
@@ -87,11 +94,25 @@ async def start_scrape(
     
     logger.info(f"Received scrape request for job_id={request.job_id}")
     
-    # Run the crawl in the background
-    background_tasks.add_task(crawl_site, request.job_id)
+    # Run the crawl in a separate background thread to resolve Windows asyncio subprocess issues
+    import threading
     
+    def run_scraper_thread():
+        if sys.platform == 'win32':
+            loop = asyncio.WindowsProactorEventLoopPolicy().new_event_loop()
+        else:
+            loop = asyncio.new_event_loop()
+            
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(crawl_site(request.job_id))
+        finally:
+            loop.close()
+
+    threading.Thread(target=run_scraper_thread, daemon=True).start()
+
     return {
         "status": "accepted",
         "job_id": request.job_id,
-        "message": "Scrape job started in background",
+        "message": "Scrape job started in background thread",
     }
