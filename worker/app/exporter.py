@@ -62,7 +62,7 @@ async def generate_exports(job_id: str):
 
     # Ensure bucket exists (ignore error if it already does)
     try:
-        sb.storage.create_bucket(bucket, {"public": False})
+        sb.storage.create_bucket(id=bucket, name=bucket, options={"public": False})
     except Exception:
         pass
 
