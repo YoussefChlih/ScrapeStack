@@ -87,7 +87,7 @@ async def health():
 
 
 @app.post("/preview")
-async def preview_page(
+def preview_page(
     request: PreviewRequest,
     x_webhook_secret: str | None = Header(None),
 ):
@@ -99,61 +99,96 @@ async def preview_page(
     
     logger.info(f"Preview request for URL: {request.url}")
     
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
-                user_agent="ScrapeStack/1.0 (+https://scrapestack.dev)",
-                viewport={"width": 1280, "height": 720},
-            )
-            page = await context.new_page()
-            
+    # Run preview in thread with proper event loop for Windows
+    import threading
+    from queue import Queue
+    
+    result_queue = Queue()
+    
+    def run_preview_thread():
+        if sys.platform == 'win32':
+            loop = asyncio.WindowsProactorEventLoopPolicy().new_event_loop()
+        else:
+            loop = asyncio.new_event_loop()
+        
+        asyncio.set_event_loop(loop)
+        
+        async def do_preview():
             try:
-                response = await page.goto(
-                    request.url,
-                    wait_until="domcontentloaded",
-                    timeout=30000,
-                )
-                
-                if not response or response.status >= 400:
-                    return {
-                        "success": False,
-                        "error": f"Failed to load page (status: {response.status if response else 'unknown'})",
-                    }
-                
-                # Wait for dynamic content
-                await page.wait_for_timeout(2000)
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=5000)
-                except Exception:
-                    pass
-                
-                # Get rendered HTML
-                html = await page.content()
-                
-                # Detect available data
-                detected = detect_page_data(html, request.url)
-                
-                await browser.close()
-                
-                return {
-                    "success": True,
-                    "data": detected,
-                }
-                
+                async with async_playwright() as p:
+                    browser = await p.chromium.launch(headless=True)
+                    context = await browser.new_context(
+                        user_agent="ScrapeStack/1.0 (+https://scrapestack.dev)",
+                        viewport={"width": 1280, "height": 720},
+                    )
+                    page = await context.new_page()
+                    
+                    try:
+                        response = await page.goto(
+                            request.url,
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        
+                        if not response or response.status >= 400:
+                            result_queue.put({
+                                "success": False,
+                                "error": f"Failed to load page (status: {response.status if response else 'unknown'})",
+                            })
+                            await browser.close()
+                            return
+                        
+                        # Wait for dynamic content
+                        await page.wait_for_timeout(2000)
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=5000)
+                        except Exception:
+                            pass
+                        
+                        # Get rendered HTML
+                        html = await page.content()
+                        
+                        # Detect available data
+                        detected = detect_page_data(html, request.url)
+                        
+                        await browser.close()
+                        
+                        result_queue.put({
+                            "success": True,
+                            "data": detected,
+                        })
+                        
+                    except Exception as e:
+                        await browser.close()
+                        logger.error(f"Error previewing {request.url}: {e}")
+                        result_queue.put({
+                            "success": False,
+                            "error": str(e),
+                        })
+            
             except Exception as e:
-                await browser.close()
-                logger.error(f"Error previewing {request.url}: {e}")
-                return {
+                logger.error(f"Preview failed: {e}", exc_info=True)
+                result_queue.put({
                     "success": False,
                     "error": str(e),
-                }
+                })
+        
+        try:
+            loop.run_until_complete(do_preview())
+        finally:
+            loop.close()
     
-    except Exception as e:
-        logger.error(f"Preview failed: {e}")
+    # Start thread and wait for result
+    thread = threading.Thread(target=run_preview_thread, daemon=True)
+    thread.start()
+    thread.join(timeout=45)
+    
+    if not result_queue.empty():
+        return result_queue.get()
+    else:
         return {
             "success": False,
-            "error": str(e),
+            "error": "Preview timed out",
         }
 
 
