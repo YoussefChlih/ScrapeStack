@@ -314,7 +314,7 @@ export default function NewScrapePage() {
                   name="crawlMode"
                   value="single_page"
                   checked={crawlMode === "single_page"}
-                  onChange={(e) => setCrawlMode(e.target.value as any)}
+                  onChange={(e) => setCrawlMode(e.target.value as "single_page" | "smart_crawl" | "full_site")}
                   className="mt-1"
                 />
                 <div>
@@ -331,7 +331,7 @@ export default function NewScrapePage() {
                   name="crawlMode"
                   value="smart_crawl"
                   checked={crawlMode === "smart_crawl"}
-                  onChange={(e) => setCrawlMode(e.target.value as any)}
+                  onChange={(e) => setCrawlMode(e.target.value as "single_page" | "smart_crawl" | "full_site")}
                   className="mt-1"
                 />
                 <div>
@@ -348,7 +348,7 @@ export default function NewScrapePage() {
                   name="crawlMode"
                   value="full_site"
                   checked={crawlMode === "full_site"}
-                  onChange={(e) => setCrawlMode(e.target.value as any)}
+                  onChange={(e) => setCrawlMode(e.target.value as "single_page" | "smart_crawl" | "full_site")}
                   className="mt-1"
                 />
                 <div>
