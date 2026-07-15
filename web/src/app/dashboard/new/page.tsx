@@ -4,16 +4,16 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { isValidUrl } from "@/lib/utils";
-import { Globe, Sliders, ArrowRight, Shield, FileText, Eye, Loader2, CheckSquare, Square } from "lucide-react";
+import { Globe, Sliders, ArrowRight, Eye, Loader2, CheckSquare, Square } from "lucide-react";
 
 interface DetectedData {
   id: string;
   type: string;
   name: string;
-  preview?: any;
+  preview?: unknown;
   count?: number;
   selector?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 interface PreviewData {
@@ -29,8 +29,6 @@ interface PreviewData {
 export default function NewScrapePage() {
   const [url, setUrl] = useState("");
   const [maxPages, setMaxPages] = useState(50);
-  const [respectRobots, setRespectRobots] = useState(true);
-  const [sameDomainOnly, setSameDomainOnly] = useState(true);
   const [crawlMode, setCrawlMode] = useState<"single_page" | "smart_crawl" | "full_site">("single_page");
   
   const [previewData, setPreviewData] = useState<PreviewData | null>(null);
@@ -85,7 +83,7 @@ export default function NewScrapePage() {
         setCrawlMode("smart_crawl");
       }
       
-    } catch (err) {
+    } catch {
       setError("Failed to preview page");
     } finally {
       setPreviewing(false);
@@ -140,8 +138,8 @@ export default function NewScrapePage() {
           target_url: url.startsWith("http") ? url : `https://${url}`,
           max_pages: crawlMode === "single_page" ? 1 : maxPages,
           status: "queued",
-          same_domain_only: sameDomainOnly,
-          respect_robots: respectRobots,
+          same_domain_only: true,
+          respect_robots: true,
           crawl_mode: crawlMode,
           selected_data_types: selectedDataArray,
           preview_data: previewData,
@@ -272,7 +270,7 @@ export default function NewScrapePage() {
                           <div className="mt-2 text-xs text-muted-foreground">
                             {Array.isArray(item.preview) && item.preview.length > 0 && (
                               <div className="space-y-1">
-                                {item.preview.slice(0, 2).map((p: any, idx: number) => (
+                                {item.preview.slice(0, 2).map((p: unknown, idx: number) => (
                                   <div key={idx} className="bg-background/50 p-2 rounded">
                                     {typeof p === "string" ? p : JSON.stringify(p).substring(0, 100)}
                                   </div>
