@@ -19,6 +19,7 @@ from playwright.async_api import async_playwright, Page, Browser
 from app.supabase_client import get_supabase
 from app.exporter import generate_exports
 from app.recommender import generate_recommendations
+from app.extractor import extract_selected_data
 
 logger = logging.getLogger("scrapestack.scraper")
 
@@ -234,12 +235,10 @@ def extract_page_data(html: str, page_url: str, base_domain: str) -> dict:
     }
 
 
-async def crawl_site(job_id: str):
+async def scrape_with_smart_extraction(job_id: str):
     """
-    Main BFS crawl function.
-    
-    Fetches the job from Supabase, crawls the target site page-by-page,
-    extracts structured data, and writes results back to Supabase.
+    Smart scrape based on user-selected data types.
+    Supports single-page, smart-crawl, and full-site modes.
     """
     sb = get_supabase()
     
@@ -252,6 +251,356 @@ async def crawl_site(job_id: str):
             logger.error(f"Job {job_id} not found")
             return
 
+        target_url = job["target_url"]
+        crawl_mode = job.get("crawl_mode", "full_site")
+        selected_data_types = job.get("selected_data_types", [])
+        max_pages = job.get("max_pages", 100)
+        
+        logger.info(f"Starting smart scrape: job={job_id}, url={target_url}, mode={crawl_mode}, data_types={selected_data_types}")
+
+        # Update job status to running
+        sb.table("scrape_jobs").update({
+            "status": "running",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", job_id).execute()
+
+        async with async_playwright() as p:
+            browser: Browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent=USER_AGENT,
+                viewport={"width": 1280, "height": 720},
+            )
+            page: Page = await context.new_page()
+
+            pages_to_scrape = [target_url]
+            visited = set()
+            pages_scraped = 0
+
+            if crawl_mode == "single_page":
+                # Only scrape the target URL
+                max_pages = 1
+            elif crawl_mode == "smart_crawl":
+                # Will detect pagination and follow it
+                pass
+            # else: full_site uses existing BFS logic
+
+            while pages_to_scrape and pages_scraped < max_pages:
+                current_url = pages_to_scrape.pop(0)
+                
+                if current_url in visited:
+                    continue
+                visited.add(current_url)
+
+                logger.info(f"Scraping [{pages_scraped + 1}/{max_pages}]: {current_url}")
+
+                status_code = 200
+                try:
+                    response = await page.goto(
+                        current_url,
+                        wait_until="domcontentloaded",
+                        timeout=30000,
+                    )
+                    if response:
+                        status_code = response.status
+
+                    # Wait for dynamic content
+                    await page.wait_for_timeout(1500)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=5000)
+                    except Exception:
+                        pass
+
+                    html = await page.content()
+
+                except Exception as e:
+                    logger.warning(f"Error loading {current_url}: {e}")
+                    status_code = 0
+                    html = ""
+
+                if html and selected_data_types:
+                    # Use smart extraction
+                    extracted = extract_selected_data(html, current_url, selected_data_types)
+                    
+                    # Store extracted data
+                    page_id = str(uuid.uuid4())
+                    
+                    # Get page title
+                    soup_temp = BeautifulSoup(html, "lxml")
+                    title_tag = soup_temp.find("title")
+                    page_title = title_tag.get_text(strip=True) if title_tag else None
+                    
+                    sb.table("scraped_pages").insert({
+                        "id": page_id,
+                        "job_id": job_id,
+                        "url": current_url,
+                        "status_code": status_code,
+                        "title": page_title,
+                        "meta_description": None,
+                        "word_count": 0,
+                        "links_found": 0,
+                        "content_text": str(extracted)[:5000],  # Store summary
+                    }).execute()
+
+                    # Store extracted data as custom type
+                    sb.table("scraped_data").insert({
+                        "page_id": page_id,
+                        "job_id": job_id,
+                        "data_type": "custom",
+                        "data": extracted,
+                    }).execute()
+
+                    # For smart_crawl, detect pagination
+                    if crawl_mode == "smart_crawl" and pages_scraped < max_pages - 1:
+                        # Look for "next" page links
+                        soup = BeautifulSoup(html, "lxml")
+                        next_link = soup.find("a", text=lambda x: x and any(keyword in x.lower() for keyword in ["next", "→", "›", "»"]))
+                        if next_link and next_link.get("href"):
+                            next_url = urljoin(current_url, next_link["href"])
+                            if next_url not in visited:
+                                pages_to_scrape.append(next_url)
+                
+                else:
+                    # Fallback to generic extraction (backwards compatibility)
+                    parsed_base = urlparse(target_url)
+                    base_domain = parsed_base.netloc
+                    data = extract_page_data(html, current_url, base_domain)
+                    
+                    page_id = str(uuid.uuid4())
+                    sb.table("scraped_pages").insert({
+                        "id": page_id,
+                        "job_id": job_id,
+                        "url": current_url,
+                        "status_code": status_code,
+                        "title": data["title"],
+                        "meta_description": data["meta_description"],
+                        "word_count": data["word_count"],
+                        "links_found": data["links_found"],
+                        "content_text": data["body_text"],
+                    }).execute()
+
+                pages_scraped += 1
+                
+                # Update progress
+                sb.table("scrape_jobs").update({
+                    "pages_scraped": pages_scraped,
+                    "pages_total": pages_scraped,
+                }).eq("id", job_id).execute()
+
+                # Shorter delay for single page mode
+                if crawl_mode == "single_page":
+                    await asyncio.sleep(0.5)
+                else:
+                    await asyncio.sleep(CRAWL_DELAY)
+
+            await browser.close()
+
+        # Job completed
+        sb.table("scrape_jobs").update({
+            "status": "completed",
+            "pages_total": pages_scraped,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", job_id).execute()
+
+        logger.info(f"Smart scrape completed: job={job_id}, pages={pages_scraped}")
+
+        # Generate exports
+        try:
+            await generate_exports(job_id)
+        except Exception as e:
+            logger.error(f"Export generation failed: {e}")
+
+        # Generate recommendations
+        try:
+            await generate_recommendations(job_id)
+        except Exception as e:
+            logger.error(f"Recommendation generation failed: {e}")
+
+    except Exception as e:
+        logger.error(f"Smart scrape failed for job={job_id}: {e}", exc_info=True)
+        try:
+            sb.table("scrape_jobs").update({
+                "status": "failed",
+                "error_message": str(e)[:500],
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", job_id).execute()
+        except Exception:
+            pass
+    """
+    Extract structured data from a page's HTML.
+    
+    Returns a dict with page-level metadata and lists of extracted items.
+    """
+    soup = BeautifulSoup(html, "lxml")
+
+    # Title
+    title_tag = soup.find("title")
+    title = title_tag.get_text(strip=True) if title_tag else None
+
+    # Meta description
+    meta_desc_tag = soup.find("meta", attrs={"name": "description"})
+    meta_description = meta_desc_tag.get("content", "") if meta_desc_tag else None
+
+    # OpenGraph & Canonical
+    canonical_tag = soup.find("link", rel="canonical")
+    canonical_url = canonical_tag.get("href", "") if canonical_tag else None
+
+    og_meta = {}
+    for meta in soup.find_all("meta", property=True):
+        prop = meta["property"].lower()
+        if prop.startswith("og:"):
+            og_meta[prop] = meta.get("content", "")
+
+    # Fallback to OG if missing
+    if not title and "og:title" in og_meta:
+        title = og_meta["og:title"]
+    if not meta_description and "og:description" in og_meta:
+        meta_description = og_meta["og:description"]
+
+    # Headings (h1-h6)
+    headings = []
+    for level in range(1, 7):
+        for heading in soup.find_all(f"h{level}"):
+            text = heading.get_text(strip=True)
+            if text:
+                headings.append({"level": level, "text": text})
+
+    # Links
+    links = []
+    internal_count = 0
+    external_count = 0
+    for a_tag in soup.find_all("a", href=True):
+        href = a_tag["href"]
+        absolute_url = urljoin(page_url, href)
+        link_text = a_tag.get_text(strip=True)
+        is_internal = is_same_domain(absolute_url, base_domain)
+        
+        links.append({
+            "url": absolute_url,
+            "text": link_text,
+            "is_internal": is_internal,
+        })
+        
+        if is_internal:
+            internal_count += 1
+        else:
+            external_count += 1
+
+    # Images
+    images = []
+    for img in soup.find_all("img"):
+        src = img.get("src", "")
+        if src:
+            absolute_src = urljoin(page_url, src)
+            images.append({
+                "src": absolute_src,
+                "alt": img.get("alt", ""),
+                "has_alt": bool(img.get("alt", "").strip()),
+            })
+
+    # Tables
+    tables = []
+    for table in soup.find_all("table"):
+        rows = []
+        for tr in table.find_all("tr"):
+            cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+            if cells:
+                rows.append(cells)
+        if rows:
+            tables.append({"rows": rows, "row_count": len(rows)})
+
+    # Meta tags
+    meta_tags = []
+    for meta in soup.find_all("meta"):
+        name = meta.get("name", meta.get("property", ""))
+        content = meta.get("content", "")
+        if name and content:
+            meta_tags.append({"name": name, "content": content})
+
+    # Add canonical and OG to meta_tags if present
+    if canonical_url:
+        meta_tags.append({"name": "canonical", "content": canonical_url})
+    for k, v in og_meta.items():
+        meta_tags.append({"name": k, "content": v})
+
+    # Now perform destructive clean-up on soup to extract body text
+    # Remove boilerplate elements
+    boilerplate_tags = [
+        "script", "style", "noscript", "nav", "footer", "header", 
+        "aside", "form", "svg", "iframe", "canvas", "modal"
+    ]
+    for tag in boilerplate_tags:
+        for elem in soup.find_all(tag):
+            elem.decompose()
+
+    # Remove hidden elements
+    for elem in soup.find_all(True):
+        if hasattr(elem, "attrs") and elem.attrs is not None:
+            style = elem.get("style", "")
+            if style:
+                style_lower = style.lower().replace(" ", "")
+                if "display:none" in style_lower or "visibility:hidden" in style_lower:
+                    elem.decompose()
+                    continue
+            if elem.get("aria-hidden") == "true":
+                elem.decompose()
+                continue
+
+    body = soup.find("body") or soup
+    # Extract text with separator to preserve word boundaries
+    body_text_raw = body.get_text(separator=" ") if body else ""
+    
+    # Clean whitespace and collapse double newlines
+    import re
+    body_text = re.sub(r'[ \t]+', ' ', body_text_raw)
+    body_text = re.sub(r'\n\s*\n\s*\n+', '\n\n', body_text)
+    body_text = body_text.strip()
+    
+    word_count = len(body_text.split()) if body_text else 0
+
+    return {
+        "title": title,
+        "meta_description": meta_description,
+        "body_text": body_text[:50000],  # Cap at 50k chars
+        "word_count": word_count,
+        "headings": headings,
+        "links": links,
+        "links_found": len(links),
+        "internal_links": internal_count,
+        "external_links": external_count,
+        "images": images,
+        "tables": tables,
+        "meta_tags": meta_tags,
+    }
+
+
+async def crawl_site(job_id: str):
+    """
+    Main BFS crawl function.
+    
+    Routes to smart extraction if selected_data_types is set,
+    otherwise uses traditional full-site crawl.
+    """
+    sb = get_supabase()
+    
+    try:
+        # Fetch the job to check mode
+        job_resp = sb.table("scrape_jobs").select("*").eq("id", job_id).single().execute()
+        job = job_resp.data
+        
+        if not job:
+            logger.error(f"Job {job_id} not found")
+            return
+        
+        # Check if smart extraction is requested
+        selected_data_types = job.get("selected_data_types", [])
+        crawl_mode = job.get("crawl_mode", "full_site")
+        
+        if selected_data_types or crawl_mode != "full_site":
+            # Use smart extraction
+            await scrape_with_smart_extraction(job_id)
+            return
+        
+        # Otherwise continue with traditional full-site crawl
         target_url = job["target_url"]
         max_pages = job.get("max_pages", 100)
         same_domain_only = job.get("same_domain_only", True)

@@ -19,10 +19,12 @@ from fastapi import FastAPI, HTTPException, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from playwright.async_api import async_playwright
 
 load_dotenv()
 
 from app.scraper import crawl_site
+from app.detector import detect_page_data
 
 # Configure logging
 logging.basicConfig(
@@ -64,6 +66,10 @@ class ScrapeRequest(BaseModel):
     job_id: str
 
 
+class PreviewRequest(BaseModel):
+    url: str
+
+
 def verify_webhook_secret(x_webhook_secret: str | None = Header(None)):
     """Verify the webhook secret matches."""
     expected = os.environ.get("WEBHOOK_SECRET", "")
@@ -78,6 +84,77 @@ def verify_webhook_secret(x_webhook_secret: str | None = Header(None)):
 async def health():
     """Health check endpoint."""
     return {"status": "healthy", "service": "scrapestack-worker"}
+
+
+@app.post("/preview")
+async def preview_page(
+    request: PreviewRequest,
+    x_webhook_secret: str | None = Header(None),
+):
+    """
+    Preview a webpage and detect available data structures.
+    Returns what can be scraped without actually scraping.
+    """
+    verify_webhook_secret(x_webhook_secret)
+    
+    logger.info(f"Preview request for URL: {request.url}")
+    
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent="ScrapeStack/1.0 (+https://scrapestack.dev)",
+                viewport={"width": 1280, "height": 720},
+            )
+            page = await context.new_page()
+            
+            try:
+                response = await page.goto(
+                    request.url,
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                
+                if not response or response.status >= 400:
+                    return {
+                        "success": False,
+                        "error": f"Failed to load page (status: {response.status if response else 'unknown'})",
+                    }
+                
+                # Wait for dynamic content
+                await page.wait_for_timeout(2000)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass
+                
+                # Get rendered HTML
+                html = await page.content()
+                
+                # Detect available data
+                detected = detect_page_data(html, request.url)
+                
+                await browser.close()
+                
+                return {
+                    "success": True,
+                    "data": detected,
+                }
+                
+            except Exception as e:
+                await browser.close()
+                logger.error(f"Error previewing {request.url}: {e}")
+                return {
+                    "success": False,
+                    "error": str(e),
+                }
+    
+    except Exception as e:
+        logger.error(f"Preview failed: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+        }
 
 
 @app.post("/scrape")
