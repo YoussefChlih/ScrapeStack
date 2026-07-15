@@ -75,7 +75,7 @@ export default function NewScrapePage() {
       setError("");
       
       // Auto-select all data by default
-      const allIds = new Set(result.data.available_data.map((d: DetectedData) => d.id));
+      const allIds = new Set<string>(result.data.available_data.map((d: DetectedData) => d.id));
       setSelectedData(allIds);
       
       // Set smart mode if pagination detected
@@ -266,7 +266,7 @@ export default function NewScrapePage() {
                           )}
                         </div>
                         
-                        {item.preview && (
+                        {item.preview != null && (
                           <div className="mt-2 text-xs text-muted-foreground">
                             {Array.isArray(item.preview) && item.preview.length > 0 && (
                               <div className="space-y-1">
