@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { useParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import {
@@ -27,7 +27,6 @@ import {
   ExternalLink,
   ArrowLeft,
   Link as LinkIcon,
-  Image as ImageIcon,
   Type,
 } from "lucide-react";
 import Link from "next/link";
@@ -52,7 +51,7 @@ const CHART_COLORS = ["#00E5A0", "#3B82F6", "#FFB020", "#FF4D6A", "#8B5CF6", "#E
 export default function JobDetailPage() {
   const params = useParams();
   const jobId = params.id as string;
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
   const [job, setJob] = useState<ScrapeJob | null>(null);
   const [pages, setPages] = useState<ScrapedPage[]>([]);
@@ -79,11 +78,13 @@ export default function JobDetailPage() {
     if (exportsRes.data) setExports(exportsRes.data as ExportType[]);
     if (dataRes.data) setScrapedData(dataRes.data as ScrapedDataItem[]);
     setLoading(false);
-  }, [jobId]);
+  }, [jobId, supabase]);
 
   // Initial fetch
   useEffect(() => {
-    fetchData();
+    Promise.resolve().then(() => {
+      fetchData();
+    });
   }, [fetchData]);
 
   // Realtime subscription
@@ -111,7 +112,7 @@ export default function JobDetailPage() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [jobId, fetchData]);
+  }, [jobId, fetchData, supabase]);
 
   if (loading) {
     return (

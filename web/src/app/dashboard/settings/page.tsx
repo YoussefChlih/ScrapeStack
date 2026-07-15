@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import type { Profile } from "@/lib/types";
@@ -13,7 +13,7 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const router = useRouter();
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
   useEffect(() => {
     async function loadProfile() {
@@ -38,7 +38,7 @@ export default function SettingsPage() {
       setLoading(false);
     }
     loadProfile();
-  }, []);
+  }, [router, supabase]);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();

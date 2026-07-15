@@ -77,7 +77,7 @@ export default function NewScrapePage() {
 
       // Navigate to the job detail page
       router.push(`/dashboard/jobs/${job.id}`);
-    } catch (err) {
+    } catch {
       setError("Something went wrong. Please try again.");
       setLoading(false);
     }
