@@ -26,6 +26,8 @@ create table public.scrape_jobs (
   pages_total int default 0,
   pages_scraped int default 0,
   max_pages int default 100,
+  same_domain_only boolean not null default true,
+  respect_robots boolean not null default true,
   error_message text,
   started_at timestamptz,
   completed_at timestamptz,

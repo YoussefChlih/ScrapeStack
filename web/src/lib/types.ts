@@ -17,6 +17,8 @@ export interface ScrapeJob {
   pages_total: number;
   pages_scraped: number;
   max_pages: number;
+  same_domain_only: boolean;
+  respect_robots: boolean;
   error_message: string | null;
   started_at: string | null;
   completed_at: string | null;
@@ -80,6 +82,8 @@ export interface Database {
           id?: string;
           pages_total?: number;
           pages_scraped?: number;
+          same_domain_only?: boolean;
+          respect_robots?: boolean;
         };
         Update: Partial<Omit<ScrapeJob, 'id' | 'created_at'>>;
       };

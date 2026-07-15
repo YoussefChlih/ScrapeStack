@@ -52,6 +52,8 @@ export default function NewScrapePage() {
           target_url: normalizedUrl,
           max_pages: maxPages,
           status: "queued",
+          same_domain_only: sameDomainOnly,
+          respect_robots: respectRobots,
         })
         .select()
         .single();

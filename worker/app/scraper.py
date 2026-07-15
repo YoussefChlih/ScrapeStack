@@ -30,16 +30,33 @@ USER_AGENT = "ScrapeStack/1.0 (+https://scrapestack.dev)"
 
 
 def is_same_domain(url: str, base_domain: str) -> bool:
-    """Check if a URL belongs to the same domain."""
+    """Check if a URL belongs to the same domain (including subdomains)."""
     parsed = urlparse(url)
-    return parsed.netloc == base_domain or parsed.netloc == ""
+    hostname = parsed.hostname
+    if not hostname:
+        return True
+    hostname = hostname.lower()
+    
+    # Normalize base_domain to strip port if present
+    base_domain_clean = base_domain
+    if "://" not in base_domain_clean:
+        base_domain_clean = f"http://{base_domain_clean}"
+    parsed_base = urlparse(base_domain_clean)
+    base_host = (parsed_base.hostname or base_domain).lower()
+    
+    return hostname == base_host or hostname.endswith("." + base_host)
 
 
 def normalize_url(url: str) -> str:
-    """Normalize a URL by removing fragments and trailing slashes."""
-    parsed = urlparse(url)
-    # Remove fragment, normalize path
-    normalized = parsed._replace(fragment="")
+    """Normalize a URL by lowercasing scheme/host/path, removing fragments and trailing slashes."""
+    url_stripped = url.strip()
+    parsed = urlparse(url_stripped)
+    normalized = parsed._replace(
+        scheme=parsed.scheme.lower(),
+        netloc=parsed.netloc.lower(),
+        path=parsed.path.lower(),
+        fragment=""
+    )
     result = normalized.geturl().rstrip("/")
     return result
 
@@ -84,14 +101,21 @@ def extract_page_data(html: str, page_url: str, base_domain: str) -> dict:
     meta_desc_tag = soup.find("meta", attrs={"name": "description"})
     meta_description = meta_desc_tag.get("content", "") if meta_desc_tag else None
 
-    # Body text
-    # Remove script and style elements
-    for element in soup(["script", "style", "noscript"]):
-        element.decompose()
+    # OpenGraph & Canonical
+    canonical_tag = soup.find("link", rel="canonical")
+    canonical_url = canonical_tag.get("href", "") if canonical_tag else None
 
-    body = soup.find("body")
-    body_text = body.get_text(separator=" ", strip=True) if body else ""
-    word_count = len(body_text.split()) if body_text else 0
+    og_meta = {}
+    for meta in soup.find_all("meta", property=True):
+        prop = meta["property"].lower()
+        if prop.startswith("og:"):
+            og_meta[prop] = meta.get("content", "")
+
+    # Fallback to OG if missing
+    if not title and "og:title" in og_meta:
+        title = og_meta["og:title"]
+    if not meta_description and "og:description" in og_meta:
+        meta_description = og_meta["og:description"]
 
     # Headings (h1-h6)
     headings = []
@@ -153,6 +177,47 @@ def extract_page_data(html: str, page_url: str, base_domain: str) -> dict:
         if name and content:
             meta_tags.append({"name": name, "content": content})
 
+    # Add canonical and OG to meta_tags if present
+    if canonical_url:
+        meta_tags.append({"name": "canonical", "content": canonical_url})
+    for k, v in og_meta.items():
+        meta_tags.append({"name": k, "content": v})
+
+    # Now perform destructive clean-up on soup to extract body text
+    # Remove boilerplate elements
+    boilerplate_tags = [
+        "script", "style", "noscript", "nav", "footer", "header", 
+        "aside", "form", "svg", "iframe", "canvas", "modal"
+    ]
+    for tag in boilerplate_tags:
+        for elem in soup.find_all(tag):
+            elem.decompose()
+
+    # Remove hidden elements
+    for elem in soup.find_all(True):
+        if hasattr(elem, "attrs") and elem.attrs is not None:
+            style = elem.get("style", "")
+            if style:
+                style_lower = style.lower().replace(" ", "")
+                if "display:none" in style_lower or "visibility:hidden" in style_lower:
+                    elem.decompose()
+                    continue
+            if elem.get("aria-hidden") == "true":
+                elem.decompose()
+                continue
+
+    body = soup.find("body") or soup
+    # Extract text with separator to preserve word boundaries
+    body_text_raw = body.get_text(separator=" ") if body else ""
+    
+    # Clean whitespace and collapse double newlines
+    import re
+    body_text = re.sub(r'[ \t]+', ' ', body_text_raw)
+    body_text = re.sub(r'\n\s*\n\s*\n+', '\n\n', body_text)
+    body_text = body_text.strip()
+    
+    word_count = len(body_text.split()) if body_text else 0
+
     return {
         "title": title,
         "meta_description": meta_description,
@@ -189,8 +254,10 @@ async def crawl_site(job_id: str):
 
         target_url = job["target_url"]
         max_pages = job.get("max_pages", 100)
+        same_domain_only = job.get("same_domain_only", True)
+        respect_robots = job.get("respect_robots", True)
         
-        logger.info(f"Starting crawl: job={job_id}, url={target_url}, max_pages={max_pages}")
+        logger.info(f"Starting crawl: job={job_id}, url={target_url}, max_pages={max_pages}, same_domain_only={same_domain_only}, respect_robots={respect_robots}")
 
         # Update job status to running
         sb.table("scrape_jobs").update({
@@ -203,7 +270,17 @@ async def crawl_site(job_id: str):
         base_domain = parsed_base.netloc
 
         # Parse robots.txt
-        robot_parser = parse_robots_txt(target_url)
+        robot_parser = None
+        if respect_robots:
+            robot_parser = parse_robots_txt(target_url)
+            if not can_fetch(robot_parser, target_url):
+                logger.info(f"Start URL blocked by robots.txt: {target_url}")
+                sb.table("scrape_jobs").update({
+                    "status": "failed",
+                    "error_message": "Crawling blocked: The target URL is disallowed by the website's robots.txt policy.",
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", job_id).execute()
+                return
 
         # BFS queue
         queue: deque[str] = deque([normalize_url(target_url)])
@@ -228,9 +305,10 @@ async def crawl_site(job_id: str):
                 visited.add(normalized)
 
                 # Check robots.txt
-                if not can_fetch(robot_parser, current_url):
-                    logger.info(f"Skipping (robots.txt): {current_url}")
-                    continue
+                if respect_robots and robot_parser:
+                    if not can_fetch(robot_parser, current_url):
+                        logger.info(f"Skipping (robots.txt): {current_url}")
+                        continue
 
                 logger.info(f"Crawling [{pages_scraped + 1}/{max_pages}]: {current_url}")
 
@@ -246,6 +324,11 @@ async def crawl_site(job_id: str):
 
                     # Wait a moment for dynamic content
                     await page.wait_for_timeout(1000)
+                    try:
+                        # Wait for network idle up to 5s to let SPA JS execute
+                        await page.wait_for_load_state("networkidle", timeout=5000)
+                    except Exception:
+                        pass
 
                     # Get rendered HTML
                     html = await page.content()
@@ -345,9 +428,9 @@ async def crawl_site(job_id: str):
                     "pages_total": min(len(visited) + len(queue), max_pages),
                 }).eq("id", job_id).execute()
 
-                # Add internal links to queue
+                # Add internal/external links to queue
                 for link in data["links"]:
-                    if link["is_internal"]:
+                    if link["is_internal"] or not same_domain_only:
                         link_url = normalize_url(link["url"])
                         # Only add HTML-like URLs
                         parsed = urlparse(link_url)

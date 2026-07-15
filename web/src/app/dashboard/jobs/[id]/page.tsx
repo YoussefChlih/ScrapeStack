@@ -257,6 +257,17 @@ export default function JobDetailPage() {
         </div>
       )}
 
+      {/* Error Message (when failed) */}
+      {job.status === "failed" && job.error_message && (
+        <div className="glass-card p-5 mb-6 border-l-4 border-l-error bg-error/5 text-error flex items-start gap-3 animate-fade-in">
+          <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
+          <div>
+            <h3 className="font-semibold text-sm uppercase tracking-wider mb-1">Crawl Job Failed</h3>
+            <p className="text-sm text-muted-foreground">{job.error_message}</p>
+          </div>
+        </div>
+      )}
+
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         <StatCard icon={FileText} label="Pages Scraped" value={formatNumber(job.pages_scraped)} />
