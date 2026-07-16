@@ -126,8 +126,8 @@ def preview_page(
                     try:
                         response = await page.goto(
                             request.url,
-                            wait_until="domcontentloaded",
-                            timeout=30000,
+                            wait_until="networkidle",
+                            timeout=45000,
                         )
                         
                         if not response or response.status >= 400:
@@ -138,14 +138,6 @@ def preview_page(
                             await browser.close()
                             return
                         
-                        # Wait for dynamic content
-                        await page.wait_for_timeout(2000)
-                        try:
-                            await page.wait_for_load_state("networkidle", timeout=5000)
-                        except Exception:
-                            pass
-                        
-                        # Get rendered HTML
                         html = await page.content()
                         
                         # Detect available data

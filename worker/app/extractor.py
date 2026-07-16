@@ -195,7 +195,6 @@ def extract_generic_cards(soup: BeautifulSoup, selector: str) -> List[Dict[str, 
     cards_data = []
     
     if selector == "auto-detected":
-        # Find card-like elements
         elements = []
         for class_name in ["card", "profile", "member", "team-member", "person", "user", "item"]:
             found = soup.find_all(class_=lambda x: x and class_name in x.lower() if x else False)
@@ -208,23 +207,130 @@ def extract_generic_cards(soup: BeautifulSoup, selector: str) -> List[Dict[str, 
     for elem in elements:
         card_data = {}
         
-        # Try to extract heading
         heading = elem.find(["h1", "h2", "h3", "h4", "h5"])
         if heading:
             card_data["title"] = heading.get_text(strip=True)
         
-        # Try to extract link
         link = elem.find("a", href=True)
         if link:
             card_data["url"] = link["href"]
         
-        # Extract all text
         card_data["content"] = elem.get_text(strip=True)[:500]
         
         if card_data.get("title") or card_data.get("content"):
             cards_data.append(card_data)
     
     return cards_data
+
+
+def extract_portfolio_content(soup: BeautifulSoup) -> Dict[str, Any]:
+    """Extract content from portfolio/personal websites."""
+    portfolio_data = {
+        "name": "",
+        "title": "",
+        "about": "",
+        "skills": [],
+        "projects": [],
+        "experience": [],
+        "education": [],
+        "contact": {},
+        "social_links": [],
+    }
+    
+    # Try JSON-LD Person/Profile structured data first
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            import json
+            data = json.loads(script.string)
+            if isinstance(data, dict):
+                if data.get("@type") in ["Person", "Profile"]:
+                    portfolio_data["name"] = data.get("name", "")
+                    portfolio_data["title"] = data.get("jobTitle", "")
+                    portfolio_data["about"] = data.get("description", "")
+                    break
+        except Exception:
+            pass
+    
+    # Extract name from common selectors if not found in JSON-LD
+    if not portfolio_data["name"]:
+        name_selectors = ["h1", ".name", "#name", ".profile-name"]
+        for selector in name_selectors:
+            elem = soup.find(selector) if selector.startswith(".") or selector.startswith("#") else soup.find(selector)
+            if elem:
+                portfolio_data["name"] = elem.get_text(strip=True)
+                break
+    
+    # Extract about section
+    about_selectors = [".about", "#about", ".bio", "#bio", ".about-me"]
+    for selector in about_selectors:
+        elem = soup.find(class_=lambda x: x and selector[1:] in x.split()) if selector.startswith(".") else soup.find(id=selector[1:]) if selector.startswith("#") else None
+        if elem:
+            portfolio_data["about"] = elem.get_text(strip=True)[:1000]
+            break
+    
+    # Extract skills
+    skill_keywords = ["skill", "expertise", "technology", "tech stack", "tools"]
+    for keyword in skill_keywords:
+        skill_sections = soup.find_all(class_=lambda x: x and keyword in x.lower() if x else False)
+        for section in skill_sections:
+            items = section.find_all(["li", "span", "a", "div"])
+            skills = [item.get_text(strip=True) for item in items if len(item.get_text(strip=True)) > 1 and len(item.get_text(strip=True)) < 50]
+            if skills:
+                portfolio_data["skills"].extend(skills[:20])
+        if portfolio_data["skills"]:
+            break
+    
+    # Extract projects
+    project_keywords = ["project", "portfolio", "work", "case-study"]
+    for keyword in project_keywords:
+        project_sections = soup.find_all(class_=lambda x: x and keyword in x.lower() if x else False)
+        for section in project_sections[:5]:
+            title = section.find(["h2", "h3", "h4", ".title", ".name"])
+            desc = section.find(["p", ".description", ".desc"])
+            link = section.find("a", href=True)
+            project = {}
+            if title:
+                project["title"] = title.get_text(strip=True)
+            if desc:
+                project["description"] = desc.get_text(strip=True)[:200]
+            if link:
+                project["url"] = link["href"]
+            if project:
+                portfolio_data["projects"].append(project)
+        if portfolio_data["projects"]:
+            break
+    
+    # Extract experience
+    exp_keywords = ["experience", "employment", "work-history"]
+    for keyword in exp_keywords:
+        exp_sections = soup.find_all(class_=lambda x: x and keyword in x.lower() if x else False)
+        for section in exp_sections[:5]:
+            items = section.find_all(["li", ".item", ".job"])
+            for item in items:
+                text = item.get_text(strip=True)
+                if text and len(text) > 10:
+                    portfolio_data["experience"].append(text[:200])
+        if portfolio_data["experience"]:
+            break
+    
+    # Extract contact info
+    contact_section = soup.find(class_=lambda x: x and "contact" in x.lower() if x else False)
+    if contact_section:
+        portfolio_data["contact"]["text"] = contact_section.get_text(strip=True)[:500]
+    
+    # Extract social links
+    social_domains = ["github.com", "linkedin.com", "twitter.com", "x.com", "instagram.com", "youtube.com"]
+    for a_tag in soup.find_all("a", href=True):
+        href = a_tag["href"]
+        for domain in social_domains:
+            if domain in href:
+                portfolio_data["social_links"].append({
+                    "platform": domain.split(".")[0],
+                    "url": href,
+                })
+                break
+    
+    return portfolio_data
 
 
 def extract_article_content(soup: BeautifulSoup, selector: str = None) -> Dict[str, Any]:
@@ -244,20 +350,16 @@ def extract_article_content(soup: BeautifulSoup, selector: str = None) -> Dict[s
         "content": "",
     }
     
-    # Get title
     title_elem = article.find(["h1", "h2"])
     if title_elem:
         article_data["title"] = title_elem.get_text(strip=True)
     
-    # Get headings
     headings = article.find_all(["h1", "h2", "h3", "h4"])
     article_data["headings"] = [h.get_text(strip=True) for h in headings]
     
-    # Get paragraphs
     paragraphs = article.find_all("p")
     article_data["paragraphs"] = [p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 30]
     
-    # Full content
     article_data["content"] = article.get_text(strip=True)
     
     return article_data
@@ -322,7 +424,6 @@ def extract_selected_data(html: str, page_url: str, selected_data: List[Dict[str
                 extracted["data"][data_id] = extract_wikipedia_article(soup)
             
             elif data_type == "infobox" and data_id == "wikipedia_infobox":
-                # Extract just infobox
                 result = extract_wikipedia_article(soup)
                 extracted["data"][data_id] = result.get("infobox", {})
             
@@ -334,6 +435,9 @@ def extract_selected_data(html: str, page_url: str, selected_data: List[Dict[str
             
             elif data_type == "list":
                 extracted["data"][data_id] = extract_list_items(soup, selector)
+            
+            elif data_type == "portfolio":
+                extracted["data"][data_id] = extract_portfolio_content(soup)
             
             else:
                 logger.warning(f"Unknown data type: {data_type}")

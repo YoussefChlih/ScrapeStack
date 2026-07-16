@@ -141,7 +141,6 @@ def detect_articles(soup: BeautifulSoup, site_type: str) -> List[Dict[str, Any]]
     articles = []
     
     if site_type == "wikipedia":
-        # Wikipedia article content
         content = soup.find("div", id="mw-content-text")
         if content:
             headings = content.find_all(["h2", "h3"])
@@ -157,7 +156,6 @@ def detect_articles(soup: BeautifulSoup, site_type: str) -> List[Dict[str, Any]]
                 "selector": "#mw-content-text",
             })
         
-        # Wikipedia infobox
         infobox = soup.find("table", class_="infobox")
         if infobox:
             rows = infobox.find_all("tr")
@@ -177,8 +175,53 @@ def detect_articles(soup: BeautifulSoup, site_type: str) -> List[Dict[str, Any]]
                 "preview": preview_data,
                 "selector": "table.infobox",
             })
+    elif site_type == "portfolio":
+        # Detect portfolio sections
+        portfolio_sections = []
+        
+        # About section
+        about = soup.find(class_=lambda x: x and "about" in x.lower() if x else False)
+        if about:
+            text = about.get_text(strip=True)[:200]
+            portfolio_sections.append({
+                "id": "portfolio_about",
+                "type": "portfolio_section",
+                "name": "About Section",
+                "preview": text,
+            })
+        
+        # Projects section
+        projects = soup.find_all(class_=lambda x: x and "project" in x.lower() if x else False)
+        if len(projects) >= 2:
+            previews = []
+            for proj in projects[:3]:
+                title = proj.find(["h2", "h3", "h4", ".title"])
+                text = title.get_text(strip=True) if title else proj.get_text(strip=True)[:100]
+                previews.append(text)
+            portfolio_sections.append({
+                "id": "portfolio_projects",
+                "type": "portfolio_section",
+                "name": f"Projects ({len(projects)} found)",
+                "count": len(projects),
+                "preview": previews,
+            })
+        
+        # Skills section
+        skills = soup.find_all(class_=lambda x: x and "skill" in x.lower() if x else False)
+        if skills:
+            skill_items = []
+            for s in skills[:3]:
+                skill_items.append(s.get_text(strip=True)[:50])
+            portfolio_sections.append({
+                "id": "portfolio_skills",
+                "type": "portfolio_section",
+                "name": f"Skills ({len(skills)} items)",
+                "preview": skill_items,
+            })
+        
+        articles.extend(portfolio_sections)
     else:
-        # Generic article detection
+        # Generic article detection with better content area finding
         article_elem = soup.find("article") or soup.find("main") or soup.find("div", class_=lambda x: x and "content" in x.lower() if x else False)
         
         if article_elem:
@@ -274,6 +317,18 @@ def detect_page_data(html: str, url: str) -> Dict[str, Any]:
     
     # Detect site type
     site_type = detect_site_type(url, soup)
+    
+    # Also check JSON-LD for Person/Organization schema
+    if site_type == "generic":
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                import json
+                data = json.loads(script.string)
+                if isinstance(data, dict) and data.get("@type") in ["Person", "Profile"]:
+                    site_type = "portfolio"
+                    break
+            except Exception:
+                pass
     
     # Get page title
     title_tag = soup.find("title")

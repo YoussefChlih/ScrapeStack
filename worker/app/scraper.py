@@ -118,6 +118,15 @@ def extract_page_data(html: str, page_url: str, base_domain: str) -> dict:
     if not meta_description and "og:description" in og_meta:
         meta_description = og_meta["og:description"]
 
+    # Structured data (JSON-LD)
+    structured_data = []
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            import json
+            structured_data.append(json.loads(script.string))
+        except Exception:
+            pass
+
     # Headings (h1-h6)
     headings = []
     for level in range(1, 7):
@@ -178,14 +187,41 @@ def extract_page_data(html: str, page_url: str, base_domain: str) -> dict:
         if name and content:
             meta_tags.append({"name": name, "content": content})
 
-    # Add canonical and OG to meta_tags if present
     if canonical_url:
         meta_tags.append({"name": "canonical", "content": canonical_url})
     for k, v in og_meta.items():
         meta_tags.append({"name": k, "content": v})
 
-    # Now perform destructive clean-up on soup to extract body text
-    # Remove boilerplate elements
+    # Extract meaningful content text
+    content_text = extract_meaningful_text(soup, page_url)
+
+    word_count = len(content_text.split()) if content_text else 0
+
+    return {
+        "title": title,
+        "meta_description": meta_description,
+        "body_text": content_text[:50000],
+        "word_count": word_count,
+        "headings": headings,
+        "links": links,
+        "links_found": len(links),
+        "internal_links": internal_count,
+        "external_links": external_count,
+        "images": images,
+        "tables": tables,
+        "meta_tags": meta_tags,
+        "structured_data": structured_data,
+    }
+
+
+def extract_meaningful_text(soup: BeautifulSoup, page_url: str) -> str:
+    """
+    Extract meaningful text content from a page, prioritizing actual content
+    over navigation, footer, sidebar, and other boilerplate.
+    """
+    import re
+    
+    # Remove boilerplate tags
     boilerplate_tags = [
         "script", "style", "noscript", "nav", "footer", "header", 
         "aside", "form", "svg", "iframe", "canvas", "modal"
@@ -194,7 +230,7 @@ def extract_page_data(html: str, page_url: str, base_domain: str) -> dict:
         for elem in soup.find_all(tag):
             elem.decompose()
 
-    # Remove hidden elements
+    # Remove elements with hidden styles
     for elem in soup.find_all(True):
         if hasattr(elem, "attrs") and elem.attrs is not None:
             style = elem.get("style", "")
@@ -207,32 +243,74 @@ def extract_page_data(html: str, page_url: str, base_domain: str) -> dict:
                 elem.decompose()
                 continue
 
-    body = soup.find("body") or soup
-    # Extract text with separator to preserve word boundaries
-    body_text_raw = body.get_text(separator=" ") if body else ""
+    # Try to find the main content area
+    main_content = None
     
-    # Clean whitespace and collapse double newlines
-    import re
-    body_text = re.sub(r'[ \t]+', ' ', body_text_raw)
-    body_text = re.sub(r'\n\s*\n\s*\n+', '\n\n', body_text)
-    body_text = body_text.strip()
+    # Priority order for content extraction
+    content_selectors = [
+        "article",
+        "main",
+        "[role='main']",
+        ".post-content",
+        ".entry-content",
+        ".article-content",
+        ".blog-content",
+        ".content-body",
+        "#content",
+        ".content",
+    ]
     
-    word_count = len(body_text.split()) if body_text else 0
+    for selector in content_selectors:
+        try:
+            if selector.startswith("["):
+                main_content = soup.select_one(selector)
+            elif selector.startswith("."):
+                main_content = soup.find(class_=lambda x: x and selector[1:] in x.split())
+            elif selector.startswith("#"):
+                main_content = soup.find(id=selector[1:])
+            else:
+                main_content = soup.find(selector)
+            
+            if main_content:
+                text = main_content.get_text(separator=" ", strip=True)
+                if len(text.split()) > 50:
+                    break
+                main_content = None
+        except Exception:
+            continue
 
-    return {
-        "title": title,
-        "meta_description": meta_description,
-        "body_text": body_text[:50000],  # Cap at 50k chars
-        "word_count": word_count,
-        "headings": headings,
-        "links": links,
-        "links_found": len(links),
-        "internal_links": internal_count,
-        "external_links": external_count,
-        "images": images,
-        "tables": tables,
-        "meta_tags": meta_tags,
-    }
+    if not main_content:
+        # Fallback: use body but try to exclude common noise
+        body = soup.find("body") or soup
+        
+        # Remove common noise elements
+        noise_selectors = [
+            ".sidebar", "#sidebar", ".widget", "#widget",
+            ".menu", "#menu", ".nav", "#nav",
+            ".breadcrumb", "#breadcrumb",
+            ".cookie", "#cookie", ".consent", "#consent",
+            ".social", "#social", ".share", "#share",
+            ".related", "#related", ".comments", "#comments",
+        ]
+        for selector in noise_selectors:
+            if selector.startswith("."):
+                for elem in body.find_all(class_=lambda x: x and selector[1:] in x.split()):
+                    elem.decompose()
+            elif selector.startswith("#"):
+                elem = body.find(id=selector[1:])
+                if elem:
+                    elem.decompose()
+        
+        main_content = body
+
+    text = main_content.get_text(separator=" ", strip=True)
+    
+    # Clean whitespace
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
+    text = text.strip()
+    
+    return text
 
 
 async def scrape_with_smart_extraction(job_id: str):
@@ -297,18 +375,11 @@ async def scrape_with_smart_extraction(job_id: str):
                 try:
                     response = await page.goto(
                         current_url,
-                        wait_until="domcontentloaded",
-                        timeout=30000,
+                        wait_until="networkidle",
+                        timeout=45000,
                     )
                     if response:
                         status_code = response.status
-
-                    # Wait for dynamic content
-                    await page.wait_for_timeout(1500)
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=5000)
-                    except Exception:
-                        pass
 
                     html = await page.content()
 
@@ -425,152 +496,6 @@ async def scrape_with_smart_extraction(job_id: str):
             }).eq("id", job_id).execute()
         except Exception:
             pass
-    """
-    Extract structured data from a page's HTML.
-    
-    Returns a dict with page-level metadata and lists of extracted items.
-    """
-    soup = BeautifulSoup(html, "lxml")
-
-    # Title
-    title_tag = soup.find("title")
-    title = title_tag.get_text(strip=True) if title_tag else None
-
-    # Meta description
-    meta_desc_tag = soup.find("meta", attrs={"name": "description"})
-    meta_description = meta_desc_tag.get("content", "") if meta_desc_tag else None
-
-    # OpenGraph & Canonical
-    canonical_tag = soup.find("link", rel="canonical")
-    canonical_url = canonical_tag.get("href", "") if canonical_tag else None
-
-    og_meta = {}
-    for meta in soup.find_all("meta", property=True):
-        prop = meta["property"].lower()
-        if prop.startswith("og:"):
-            og_meta[prop] = meta.get("content", "")
-
-    # Fallback to OG if missing
-    if not title and "og:title" in og_meta:
-        title = og_meta["og:title"]
-    if not meta_description and "og:description" in og_meta:
-        meta_description = og_meta["og:description"]
-
-    # Headings (h1-h6)
-    headings = []
-    for level in range(1, 7):
-        for heading in soup.find_all(f"h{level}"):
-            text = heading.get_text(strip=True)
-            if text:
-                headings.append({"level": level, "text": text})
-
-    # Links
-    links = []
-    internal_count = 0
-    external_count = 0
-    for a_tag in soup.find_all("a", href=True):
-        href = a_tag["href"]
-        absolute_url = urljoin(page_url, href)
-        link_text = a_tag.get_text(strip=True)
-        is_internal = is_same_domain(absolute_url, base_domain)
-        
-        links.append({
-            "url": absolute_url,
-            "text": link_text,
-            "is_internal": is_internal,
-        })
-        
-        if is_internal:
-            internal_count += 1
-        else:
-            external_count += 1
-
-    # Images
-    images = []
-    for img in soup.find_all("img"):
-        src = img.get("src", "")
-        if src:
-            absolute_src = urljoin(page_url, src)
-            images.append({
-                "src": absolute_src,
-                "alt": img.get("alt", ""),
-                "has_alt": bool(img.get("alt", "").strip()),
-            })
-
-    # Tables
-    tables = []
-    for table in soup.find_all("table"):
-        rows = []
-        for tr in table.find_all("tr"):
-            cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-            if cells:
-                rows.append(cells)
-        if rows:
-            tables.append({"rows": rows, "row_count": len(rows)})
-
-    # Meta tags
-    meta_tags = []
-    for meta in soup.find_all("meta"):
-        name = meta.get("name", meta.get("property", ""))
-        content = meta.get("content", "")
-        if name and content:
-            meta_tags.append({"name": name, "content": content})
-
-    # Add canonical and OG to meta_tags if present
-    if canonical_url:
-        meta_tags.append({"name": "canonical", "content": canonical_url})
-    for k, v in og_meta.items():
-        meta_tags.append({"name": k, "content": v})
-
-    # Now perform destructive clean-up on soup to extract body text
-    # Remove boilerplate elements
-    boilerplate_tags = [
-        "script", "style", "noscript", "nav", "footer", "header", 
-        "aside", "form", "svg", "iframe", "canvas", "modal"
-    ]
-    for tag in boilerplate_tags:
-        for elem in soup.find_all(tag):
-            elem.decompose()
-
-    # Remove hidden elements
-    for elem in soup.find_all(True):
-        if hasattr(elem, "attrs") and elem.attrs is not None:
-            style = elem.get("style", "")
-            if style:
-                style_lower = style.lower().replace(" ", "")
-                if "display:none" in style_lower or "visibility:hidden" in style_lower:
-                    elem.decompose()
-                    continue
-            if elem.get("aria-hidden") == "true":
-                elem.decompose()
-                continue
-
-    body = soup.find("body") or soup
-    # Extract text with separator to preserve word boundaries
-    body_text_raw = body.get_text(separator=" ") if body else ""
-    
-    # Clean whitespace and collapse double newlines
-    import re
-    body_text = re.sub(r'[ \t]+', ' ', body_text_raw)
-    body_text = re.sub(r'\n\s*\n\s*\n+', '\n\n', body_text)
-    body_text = body_text.strip()
-    
-    word_count = len(body_text.split()) if body_text else 0
-
-    return {
-        "title": title,
-        "meta_description": meta_description,
-        "body_text": body_text[:50000],  # Cap at 50k chars
-        "word_count": word_count,
-        "headings": headings,
-        "links": links,
-        "links_found": len(links),
-        "internal_links": internal_count,
-        "external_links": external_count,
-        "images": images,
-        "tables": tables,
-        "meta_tags": meta_tags,
-    }
 
 
 async def crawl_site(job_id: str):
@@ -665,21 +590,12 @@ async def crawl_site(job_id: str):
                 try:
                     response = await page.goto(
                         current_url,
-                        wait_until="domcontentloaded",
-                        timeout=30000,
+                        wait_until="networkidle",
+                        timeout=45000,
                     )
                     if response:
                         status_code = response.status
 
-                    # Wait a moment for dynamic content
-                    await page.wait_for_timeout(1000)
-                    try:
-                        # Wait for network idle up to 5s to let SPA JS execute
-                        await page.wait_for_load_state("networkidle", timeout=5000)
-                    except Exception:
-                        pass
-
-                    # Get rendered HTML
                     html = await page.content()
 
                 except Exception as e:
